@@ -1,0 +1,65 @@
+#!/usr/bin/env ruby
+# encoding: utf-8
+
+require 'optparse'
+require "amqp"
+
+Class.new do
+  def opt_parse
+    @option = OptionParser.new do |opts|
+      opts.on "-s", "--server [SERVER]", "AMQP server"
+      opts.on "-t", "--topic [TOPIC]", "subscribe topic"
+      opts.on "-r", "--routing [ROUTING KEY]", "subscribe routing key"
+    end.getopts
+
+    raise StandardError, 'topic required' unless @topic = @option['topic']
+
+    @server = @option['server'] || '127.0.0.1'
+    @routing = @option['routing'] || '#'
+  end
+
+  def run
+    begin
+      opt_parse
+    rescue StandardError => e
+      puts "ERROR: #{e.message}"
+      exit
+    end
+
+    puts "AMQP server: #{@server}"
+    puts "Topic: #{@topic}"
+    puts "Routing key: #{@routing}"
+    puts ""
+
+    ['INT','TERM'].each do |s|
+      Signal.trap(s) { EM.stop }
+    end
+
+    on_tcp_connection_failure = Proc.new do |setting|
+      puts "TCP connection failure: #{setting[:host]}"
+      EM.stop
+    end
+
+    connection_settings = {
+      host: @server,
+      on_tcp_connection_failure: on_tcp_connection_failure
+    }
+
+    AMQP.start(connection_settings) do |connection, open_ok|
+      channel  = AMQP::Channel.new(connection)
+      channel.on_error do |ch, channel_close|
+        puts "Channel-level error: #{channel_close.reply_text}, shutting down..."
+        connection.close { EM.stop }
+      end
+
+      exchange = channel.topic(@topic, auto_delete: true)
+
+      channel.queue("", :exclusive => true) do |queue|
+        queue.bind(exchange, routing_key: @routing).subscribe do |headers, payload|
+            puts "#{headers.routing_key}: #{payload}"
+          end
+      end
+    end
+  end
+end.new.run
+
